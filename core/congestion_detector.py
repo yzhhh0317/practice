@@ -37,36 +37,24 @@ class CongestionDetector:
             }
 
     def check_link_state(self, link: Link) -> str:
-        """检查链路状态，降低检测频率"""
+        """检查链路状态"""
         link_id = f"S{link.source_id}-S{link.target_id}"
         occupancy = link.queue_occupancy
-        current_state = 'normal'  # 初始化默认状态
-
-        # 初始化状态历史和统计
-        if link_id not in self.state_history:
-            self.state_history[link_id] = []
-        self.initialize_cycle_stats(link_id)
 
         cycle = self.get_current_cycle()
-        # 降低检测阈值的幅度
-        cycle_threshold = self.congestion_threshold - cycle * 0.03  # 从0.05改为0.03
 
-        # 降低统计频率，每10次检测才记录一次
-        if self.cycle_stats[cycle][link_id]['detections'] % 10 == 0:
-            if occupancy >= cycle_threshold:
-                current_state = 'congestion'
-                self.cycle_stats[cycle][link_id]['congestions'] += 1
-            elif occupancy >= self.warning_threshold:
-                current_state = 'warning'
-                self.cycle_stats[cycle][link_id]['warnings'] += 1
+        # 调整周期阈值
+        cycle_threshold = self.congestion_threshold - cycle * 0.05
 
-            # 更新状态历史
-            self.state_history[link_id].append(current_state)
-            if len(self.state_history[link_id]) > self.release_duration:
-                self.state_history[link_id].pop(0)
+        # 多链路场景的阈值调整
+        link_factor = (hash(link_id) % 4) * 0.02
+        adjusted_threshold = cycle_threshold + link_factor
 
-        self.cycle_stats[cycle][link_id]['detections'] += 1
-        return current_state
+        if occupancy >= adjusted_threshold:
+            return 'congestion'
+        elif occupancy >= self.warning_threshold:
+            return 'warning'
+        return 'normal'
 
     def generate_warning_packet(self, link: Link, metrics) -> 'CongestionWarningPacket':
         """生成拥塞预警包，考虑学习效果"""

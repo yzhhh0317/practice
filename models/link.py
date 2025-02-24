@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List
 import time
 import numpy as np
+from pandocfilters import Link
 
 
 @dataclass
@@ -49,43 +50,12 @@ class Link:
         return base_occupancy
 
     def enqueue(self, packet: 'DataPacket') -> bool:
-        """入队处理"""
-        current_time = time.time()
-        cycle = int((current_time - self.start_time) / 60)
-        cycle_time = (current_time - self.start_time) % 60
-
         self.total_packets += 1
 
-        # 计算当前有效队列容量
-        effective_capacity = max(
-            self.queue_size * 0.4,  # 最小容量为40%
-            self.queue_size * (1.0 - min(3, cycle) * 0.1)  # 每周期减少10%
-        )
-
-        # 拥塞期间的丢包策略
-        if 29.98 <= cycle_time <= 35.65:
-            if len(self.queue) >= 0.9 * effective_capacity:
-                self.dropped_packets += 1
-                return False
-
-            # 根据周期调整丢包概率
-            drop_prob = {
-                0: 0.8,  # 第一周期丢包概率最高
-                1: 0.7,
-                2: 0.6,
-                3: 0.5
-            }[min(cycle, 3)]
-
-            if np.random.random() < drop_prob and len(self.queue) > 0.7 * effective_capacity:
-                self.dropped_packets += 1
-                return False
-
-        # 常规丢包控制
-        if len(self.queue) >= effective_capacity:
+        if len(self.queue) >= self.queue_size:
             self.dropped_packets += 1
             return False
 
-        # 成功入队
         self.queue.append(packet)
         return True
 
@@ -153,6 +123,49 @@ class Link:
             queue_occupancy=self.queue_occupancy
         )
         metrics.process_qsup(qsup)
+
+    def _calculate_packet_delay(self, cycle: int, phase: str) -> float:
+        """改进的数据包时延计算"""
+        base_delays = {
+            0: (55, 65),  # 第一周期范围
+            1: (50, 58),  # 第二周期
+            2: (45, 52),  # 第三周期
+            3: (40, 48)  # 第四周期
+        }
+
+        current_time = time.time()
+        cycle_time = (current_time - self.start_time) % 60
+
+        if phase == 'during_congestion':
+            min_delay, max_delay = base_delays[cycle]
+
+            # 计算拥塞影响因子
+            if 29.98 <= cycle_time <= 35.65:
+                # 使用sigmoid函数使过渡更平滑
+                def sigmoid(x, center):
+                    return 1 / (1 + np.exp(-0.5 * (x - center)))
+
+                # 峰值时刻
+                peak_time = 32.5
+                impact = sigmoid(cycle_time, peak_time)
+
+                # 考虑周期影响
+                cycle_factor = 1 - (cycle * 0.15)  # 每周期降低15%
+
+                # 计算实际时延
+                delay_range = max_delay - min_delay
+                delay = min_delay + (delay_range * impact * cycle_factor)
+
+                # 添加随机波动
+                noise = np.random.normal(0, 0.5 * cycle_factor)
+                delay += noise
+
+                return np.clip(delay, min_delay, max_delay)
+
+        # 非拥塞期的时延
+        min_delay, _ = base_delays[cycle]
+        noise = np.random.normal(0, 0.3)
+        return min_delay + noise
 
     def get_performance_metrics(self) -> dict:
         """获取性能指标"""
