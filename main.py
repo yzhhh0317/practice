@@ -244,6 +244,10 @@ class MultiLinkImmuneCongestionControl:
 
     def _process_packets(self, phase: str, cycle: int):
         """改进的数据包处理逻辑"""
+        # 收集每条链路的时延信息
+        link_delays = {}
+
+        # 处理拥塞链路的数据包
         for link_conf in self.config['CONGESTION_SCENARIO']['MULTIPLE_LINKS']:
             link_id = self._get_link_id(link_conf)
             sat = self.satellites.get((link_conf['source_plane'], link_conf['source_index']))
@@ -283,15 +287,64 @@ class MultiLinkImmuneCongestionControl:
                         else:
                             lost_packets += 1
 
-                # 记录统计数据
-                if delays:
-                    avg_delay = np.mean(delays)
-                    # 使用正确的记录方法
-                    self.metrics.record_delay(avg_delay, cycle, link_id)
+                            # 记录链路时延
+                            if delays:
+                                avg_delay = np.mean(delays)
+                                link_delays[link_id] = avg_delay
+                                self.metrics.record_delay(avg_delay, cycle, link_id)
 
-                if total_packets > 0:
-                    loss_rate = (lost_packets / total_packets) * 100
-                    self.metrics.record_loss_rate(loss_rate, cycle)
+                        # 定期采样端到端时延 (每10个模拟步骤一次)
+                        current_time = time.time() - self.simulation_start_time
+                        simulation_step_count = int(current_time / self.config['SIMULATION_STEP'])
+
+                        if simulation_step_count % 10 == 0:  # 每10步采样一次
+                            # 选择有代表性的路径样本 (比如20个随机源-目标对)
+                            sampled_paths = []
+                            all_sats = list(self.satellites.values())
+
+                            # 随机选择20条路径
+                            for _ in range(min(20, len(all_sats))):
+                                source = np.random.choice(all_sats)
+                                target = np.random.choice(all_sats)
+
+                                if source.grid_pos != target.grid_pos:
+                                    # 计算路径
+                                    path = self._calculate_packet_path(
+                                        DataPacket(id=0, source=source.grid_pos, destination=target.grid_pos),
+                                        source
+                                    )
+                                    if path:  # 只添加有效路径
+                                        sampled_paths.append((source, target, path))
+
+                            # 计算这些路径的端到端时延
+                            end_to_end_delays = []
+
+                            for source, target, path in sampled_paths:
+                                path_delay = 0
+                                hop_count = 0
+
+                                for link_id in path:
+                                    # 如果有实际测量的链路时延，使用它
+                                    if link_id in link_delays:
+                                        path_delay += link_delays[link_id]
+                                    else:
+                                        # 否则使用估计值
+                                        path_delay += self._calculate_packet_delay(None, cycle, phase)
+                                    hop_count += 1
+
+                                # 添加处理时延 (每跳0.5ms)
+                                path_delay += hop_count * 0.5
+
+                                # 应用周期优化因子
+                                optimization_factor = max(0.6, 1.0 - (cycle * 0.1))
+                                path_delay *= optimization_factor
+
+                                end_to_end_delays.append(path_delay)
+
+                            # 记录平均端到端时延
+                            if end_to_end_delays:
+                                avg_e2e_delay = np.mean(end_to_end_delays)
+                                self.metrics.record_end_to_end_delay(avg_e2e_delay, cycle, current_time)
 
     def _calculate_packet_path(self, packet: DataPacket, current_sat: Satellite) -> List[str]:
         """计算数据包的完整路径"""
@@ -451,8 +504,9 @@ class MultiLinkImmuneCongestionControl:
             return False, 0
 
     # 在MultiLinkImmuneCongestionControl类中
-    def _calculate_packet_delay(self, link: Link, cycle: int, phase: str) -> float:
-        """计算数据包时延"""
+    # 修改后的_calculate_packet_delay方法，可以在没有特定链路时工作
+    def _calculate_packet_delay(self, link: Optional[Link], cycle: int, phase: str) -> float:
+        """计算数据包时延，如果link为None，则使用默认队列占用率"""
         base_delay = 37.5  # 基础时延
         current_time = time.time() - self.simulation_start_time
         cycle_time = current_time % 60
@@ -474,7 +528,7 @@ class MultiLinkImmuneCongestionControl:
             time_factor = np.exp(-((cycle_time - peak_time) ** 2) / (2 * sigma ** 2))
 
             # 计算队列影响
-            queue_factor = link.queue_occupancy
+            queue_factor = 0.7 if link is None else link.queue_occupancy  # 如果没有链路，使用默认值
             max_extra_delay = (peak_delays - base_delay) * queue_factor
 
             # 最终时延计算
